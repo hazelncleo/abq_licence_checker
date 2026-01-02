@@ -1,0 +1,123 @@
+#!/bin/sh -eu
+
+trap trapint SIGINT SIGTERM
+function trapint {
+	echo "                              "
+	exit 0
+}
+
+usage() {
+	echo -e "Help: ${BLUE}Abaqus Wait Script${NC}"
+	echo -e "  [-s <script_to_run>], path to the script to run (${RED}Required${NC})"
+	echo -e "  [-n <ncpus>],         number of cpus for abaqus run (${RED}Required${NC})"
+	echo "  [-c],                 if analysis is coupled"
+	echo "  [-h],                 help menu"
+}
+
+
+# Get inputs
+script_provided=false
+ncpus_provided=false
+coupling_required=false
+re='^[0-9]+$'
+
+while getopts ":s:n:ch" opt; do
+	case $opt in
+	h)
+		# Help command given
+		usage
+		exit 1
+		;;
+	s)
+		script_path="$OPTARG"
+		script_provided=true
+		;;
+	n)
+		ncpus_required="$OPTARG"
+		ncpus_provided=true
+		;;
+	c)
+		coupling_required=true
+		;;
+	\?)
+		echo -e "${RED}ERROR: Invalid option -$OPTARG${NC}"
+		usage
+		exit 1
+		;;
+	:)
+		echo -e "${RED}ERROR: Missing option argument for -$OPTARG${NC}"
+		usage
+		exit 1
+		;;
+	*)
+		echo -e "${RED}Unimplemented option: -$opt${NC}"
+		usage
+		exit 1
+		;;
+	esac
+done
+
+# Check arguments are valid
+if [[ "$script_provided" == false ]]; then
+	echo -e "${RED}ERROR: A script path must be provided${NC}"
+	exit 1
+elif [[ "$ncpus_provided" == false ]]; then
+	echo -e "${RED}ERROR: A number of cpus to use must be provided${NC}"
+	exit 1
+elif [ ! -f "$script_path" ]; then
+	echo -e "${RED}ERROR: The provided '-s $script_path' does not exist in the directory${NC}"
+	usage
+	exit 1
+elif ! [[ "$ncpus_required" =~ $re ]]; then
+	echo -e "${RED}ERROR: The provided '-n $ncpus_required' is not a valid number of cpus${NC}"
+	usage
+	exit 1
+fi
+
+# Calculate number of licenses required
+if [[ "$coupling_required" == true ]]; then
+	licenses_required=$(echo "5*e(l($ncpus_required)*0.422)" | bc -l | xargs printf %.0f)
+	licenses_required=$((licenses_required + 3))
+else
+	licenses_required=$(echo "5*e(l($ncpus_required)*0.422)" | bc -l | xargs printf %.0f)
+fi
+
+echo "Number of licenses required for analysis: $licenses_required"
+i=1
+
+# Ping license server every 15 minutes to check if enough licenses are available
+while [[ $i -le 20 ]]; do
+
+	# Sleep 15 minutes if attempt failed
+	if [ $i -gt 1 ]; then
+		attempt=$(("$i-1"))
+		echo -e "${YELLOW}Attempt $attempt failed${NC}"
+		echo "Sleeping for 15 minutes"
+		for j in $(seq 1 15); do
+			s=$(("15-$j"))
+			python -c "print('[' + ('*' * $j) + (' ' * $s ) + ']', end='\r')"
+			sleep 60
+		done
+	fi
+
+	# Get license data from license server
+	abaqus licensing lmstat -c ~/abaquslm.lic -f abaqus --no-user-info > "$ABQ_LICENSE_CHECKER_PATH/license_info.log"
+	license_data_orig=$(sed -n 4p "$ABQ_LICENSE_CHECKER_PATH/license_info.log")
+	license_data="$(echo $license_data_orig | awk -F '; Total of ' '{print $2}' | awk -F ' floating' '{print $1}')"
+	licenses_avail=$(("100-$license_data"))
+	echo "Number of licenses available: $licenses_avail"
+
+	# If enough available, then run the batch script
+	if [ $licenses_avail -ge $licenses_required ]; then
+		echo -e "${GREEN}Enough Licenses are available${NC}"
+		break
+	else
+		echo -e "${YELLOW}Not enough licenses are available (N_avail=$licenses_avail < N_req=$licenses_required)${NC}"
+	fi
+	(( i += 1 ))
+done
+
+echo -e "${GREEN}Running Script${NC}"
+sbatch "$script_path"
+submit_time=$(date '+%r')
+echo -e "${GREEN}Script successfully submitted on attempt $i at time $submit_time${NC}"
