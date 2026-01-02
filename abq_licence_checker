@@ -6,6 +6,13 @@ function trapint {
 	exit 0
 }
 
+# Text Colours
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+NC='\033[0m'
+BLUE='\033[0;34m'
+YELLOW='\033[0;33m'
+
 usage() {
 	echo -e "Help: ${BLUE}Abaqus Wait Script${NC}"
 	echo -e "  [-s <script_to_run>], path to the script to run (${RED}Required${NC})"
@@ -19,10 +26,10 @@ usage() {
 script_provided=false
 ncpus_provided=false
 coupling_required=false
-re='^[0-9]+$'
+int_check="^[0-9]+$"
 
 while getopts ":s:n:ch" opt; do
-	case $opt in
+	case "$opt" in
 	h)
 		# Help command given
 		usage
@@ -68,7 +75,8 @@ elif [ ! -f "$script_path" ]; then
 	echo -e "${RED}ERROR: The provided '-s $script_path' does not exist in the directory${NC}"
 	usage
 	exit 1
-elif ! [[ "$ncpus_required" =~ $re ]]; then
+elif ! [[ "$ncpus_required" =~ $int_check ]]; then
+	echo "$ncpus_required $re"
 	echo -e "${RED}ERROR: The provided '-n $ncpus_required' is not a valid number of cpus${NC}"
 	usage
 	exit 1
@@ -86,38 +94,42 @@ echo "Number of licenses required for analysis: $licenses_required"
 i=1
 
 # Ping license server every 15 minutes to check if enough licenses are available
-while [[ $i -le 20 ]]; do
+while [[ "$i" -le 21 ]]; do
 
 	# Sleep 15 minutes if attempt failed
-	if [ $i -gt 1 ]; then
+	if [ "$i" -gt 1 ]; then
 		attempt=$(("$i-1"))
 		echo -e "${YELLOW}Attempt $attempt failed${NC}"
 		echo "Sleeping for 15 minutes"
 		for j in $(seq 1 15); do
 			s=$(("15-$j"))
-			python -c "print('[' + ('*' * $j) + (' ' * $s ) + ']', end='\r')"
+			printf -v prog "%*s" "$j" ""; prog="${prog// /*}"
+			printf -v spaces "%*s" "$s" ""; spaces="${spaces// / }"
+			printf "[%s%s] %i/15 Minutes\r" "$prog" "$spaces" "$j"
 			sleep 60
 		done
 	fi
 
 	# Get license data from license server
-	abaqus licensing lmstat -c ~/abaquslm.lic -f abaqus --no-user-info > "$ABQ_LICENSE_CHECKER_PATH/license_info.log"
+	abaqus licensing lmstat -c "$ABAQUSLM_LICENSE_FILE" -f abaqus --no-user-info > "$ABQ_LICENSE_CHECKER_PATH/license_info.log"
 	license_data_orig=$(sed -n 4p "$ABQ_LICENSE_CHECKER_PATH/license_info.log")
 	license_data="$(echo $license_data_orig | awk -F '; Total of ' '{print $2}' | awk -F ' floating' '{print $1}')"
 	licenses_avail=$(("100-$license_data"))
 	echo "Number of licenses available: $licenses_avail"
 
 	# If enough available, then run the batch script
-	if [ $licenses_avail -ge $licenses_required ]; then
+	if [ "$licenses_avail" -ge "$licenses_required" ]; then
 		echo -e "${GREEN}Enough Licenses are available${NC}"
-		break
+		echo -e "${GREEN}Running Script${NC}"
+		sbatch "$script_path"
+		submit_time=$(date '+%r')
+		echo -e "${GREEN}Script successfully submitted on attempt $i at time $submit_time${NC}"
+		exit 1
 	else
 		echo -e "${YELLOW}Not enough licenses are available (N_avail=$licenses_avail < N_req=$licenses_required)${NC}"
 	fi
 	(( i += 1 ))
 done
 
-echo -e "${GREEN}Running Script${NC}"
-sbatch "$script_path"
-submit_time=$(date '+%r')
-echo -e "${GREEN}Script successfully submitted on attempt $i at time $submit_time${NC}"
+(( i -= 2 ))
+echo -e "${RED}ERROR: Failed to Submit the job after $i attempts.${NC}"
